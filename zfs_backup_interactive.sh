@@ -17,6 +17,10 @@ set -euo pipefail
 # - Prints commands that would run.
 # - Preserves confirmation prompts.
 # - Does not execute any destructive or state-changing commands.
+#
+# Development disclaimer:
+# - This script was produced primarily with AI assistance, with human input,
+#   review, and debugging.
 ###############################################################################
 
 usage() {
