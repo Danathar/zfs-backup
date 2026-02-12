@@ -30,20 +30,21 @@ Usage:
 
 Example:
   zfs_backup_interactive.sh \
-    -s zfsprod \
-    -d backup \
-    -b 121825 \
-    -n Dec2325 \
-    -e youtube
+    -s SOURCE_POOL \
+    -d DEST_POOL \
+    -b BASE_SNAP \
+    -n NEW_SNAP \
+    -e EXCLUDED_CHILD
 
 Options:
-  -s SOURCE_POOL   Source pool/dataset root (example: zfsprod)
-  -d DEST_POOL     Destination pool/dataset root (example: backup)
+  -s SOURCE_POOL   Source pool/dataset root (example: SOURCE_POOL)
+  -d DEST_POOL     Destination pool/dataset root (example: DEST_POOL)
   -b BASE_SNAP     Existing snapshot name to increment from (no '@')
   -n NEW_SNAP      New snapshot name to create (default: YYYYmmdd-HHMMSS)
   -e DATASET       Child dataset to exclude by deleting BASE/NEW snapshots
                    before send. Repeat flag for multiple datasets.
-                   Accepts relative name (youtube) or full path (zfsprod/youtube).
+                   Accepts relative name (EXCLUDED_CHILD) or full path
+                   (SOURCE_POOL/EXCLUDED_CHILD).
   -l LOG_FILE      Write run output to this file (default: ./zfs-backup-<timestamp>.log)
   --dry-run        Show what would run, but execute nothing
   -h, --help       Show this help
@@ -179,8 +180,8 @@ run_step() {
 
 ###############################################################################
 # Normalize exclude dataset names:
-# - "youtube"        -> "zfsprod/youtube" (if SOURCE=zfsprod)
-# - "zfsprod/youtube" remains unchanged
+# - "EXCLUDED_CHILD"              -> "SOURCE_POOL/EXCLUDED_CHILD"
+# - "SOURCE_POOL/EXCLUDED_CHILD" remains unchanged
 ###############################################################################
 resolve_exclude_dataset() {
   local raw="$1"

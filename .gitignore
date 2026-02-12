@@ -1,0 +1,12 @@
+# Local run artifacts
+zfs-backup-*.log
+*.zfs-backup.log
+
+# Local transcript exports
+SESSION_TRANSCRIPT.md
+SESSION_TRANSCRIPT*.md
+
+# Editor/system noise
+*.swp
+*.swo
+.DS_Store
