@@ -1,6 +1,7 @@
 # zfs-backup
 
-> **Note:** This was created with some AI. Its pretty easy to read the code, but you should know this.
+> [!NOTE]
+> This was created with some AI. Its pretty easy to read the code, but you should know this.
 
 
 Interactive ZFS backup script for controlled snapshot replication with optional exclusions and dry-run mode.
