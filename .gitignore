@@ -10,3 +10,4 @@ SESSION_TRANSCRIPT*.md
 *.swp
 *.swo
 .DS_Store
+.aider*
