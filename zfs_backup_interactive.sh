@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ###############################################################################
 # Interactive incremental ZFS backup script with optional dry-run mode.
@@ -15,6 +15,7 @@ set -euo pipefail
 # 8) Calculate exact stream size for pv when running live.
 # 9) Send incremental replication stream with pv progress.
 # 10) Verify destination snapshots.
+# 11) Optionally export destination pool.
 #
 # Dry-run behavior:
 # - Prints commands that would run.
@@ -25,6 +26,12 @@ set -euo pipefail
 # - This script was produced primarily with AI assistance, with human input,
 #   review, and debugging.
 ###############################################################################
+
+# Require bash 4.4+ for safe empty array expansion with set -u.
+if [[ "${BASH_VERSINFO[0]}" -lt 4 || ( "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 4 ) ]]; then
+  echo "Error: bash 4.4+ is required." >&2
+  exit 1
+fi
 
 usage() {
   cat <<'USAGE'
@@ -69,6 +76,7 @@ SEND_SIZE=""
 SEND_CMD=()
 PV_CMD=()
 RECV_CMD=()
+SNAP_CREATED=0
 
 # Normalize long options so they can appear in any position.
 NORMALIZED_ARGS=()
@@ -146,11 +154,40 @@ if [[ "$BASE_SNAP" == *"@"* || "$NEW_SNAP" == *"@"* ]]; then
   exit 1
 fi
 
+# Guard against destination being inside the source — this would corrupt data.
+if [[ "$DEST" == "$SOURCE" || "$DEST" == "$SOURCE/"* ]]; then
+  echo "Error: destination '${DEST}' is inside source '${SOURCE}'." >&2
+  exit 1
+fi
+
 DEST_POOL="${DEST%%/*}"
+
+# Validate log file path before setting up the tee redirect.
+LOG_DIR="$(cd "$(dirname "$LOG_FILE")" 2>/dev/null && pwd)" || true
+if [[ -z "$LOG_DIR" || ! -d "$LOG_DIR" ]]; then
+  echo "Error: log directory does not exist: $(dirname "$LOG_FILE")" >&2
+  exit 1
+fi
+if [[ ! -w "$LOG_DIR" ]]; then
+  echo "Error: log directory is not writable: $LOG_DIR" >&2
+  exit 1
+fi
 
 # Mirror all script output to a per-run log file.
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "Log file: $LOG_FILE"
+
+# Warn about orphaned snapshots on abnormal exit.
+cleanup() {
+  if [[ "$SNAP_CREATED" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+    echo >&2
+    echo "WARNING: snapshot '${SOURCE}@${NEW_SNAP}' was created but the send may not have completed." >&2
+    echo "You may want to destroy it:  sudo zfs destroy -r '${SOURCE}@${NEW_SNAP}'" >&2
+  fi
+  # Give the tee process substitution time to flush final output to the log.
+  sleep 0.1 2>/dev/null || true
+}
+trap cleanup EXIT
 
 die() {
   echo "Error: $*" >&2
@@ -313,7 +350,7 @@ build_send_cmd() {
 
 build_pv_cmd() {
   PV_CMD=(pv -f -pterab)
-  if [[ -n "$SEND_SIZE" ]]; then
+  if [[ -n "$SEND_SIZE" && "$SEND_SIZE" -gt 0 ]]; then
     PV_CMD+=(-s "$SEND_SIZE")
   fi
 }
@@ -333,13 +370,13 @@ calculate_send_size() {
   size_cmd+=(-I "${SOURCE}@${BASE_SNAP}" "${SOURCE}@${NEW_SNAP}")
 
   if ! output="$("${size_cmd[@]}" 2>&1)"; then
-    echo "$output"
+    echo "$output" >&2
     return 1
   fi
 
   size="$(awk -F '\t' '/^(full|incremental)\t/ {sum += $NF} END {print sum+0}' <<<"$output")"
-  if [[ "$size" -le 0 ]]; then
-    echo "$output"
+  if [[ "$size" -lt 0 ]]; then
+    echo "$output" >&2
     return 1
   fi
 
@@ -360,8 +397,19 @@ if ! command -v pv >/dev/null 2>&1; then
   exit 1
 fi
 
+# Validate sudo access upfront so password prompts don't break the send pipeline.
+if ! sudo -v 2>/dev/null; then
+  echo "Error: sudo access is required but could not be validated." >&2
+  exit 1
+fi
+
 require_dataset_exists "$SOURCE" "source dataset"
 require_snapshot_exists "${SOURCE}@${BASE_SNAP}" "source base snapshot"
+
+# Catch snapshot name collisions before doing any work.
+if snapshot_exists "${SOURCE}@${NEW_SNAP}"; then
+  die "snapshot already exists: ${SOURCE}@${NEW_SNAP}"
+fi
 
 if ((${#EXCLUDES[@]} > 0)); then
   for raw in "${EXCLUDES[@]}"; do
@@ -374,17 +422,25 @@ if ((${#EXCLUDES[@]} > 0)); then
   done
 fi
 
+# Check that zfs send -X is supported when excludes are requested.
+if ((${#NORMALIZED_EXCLUDES[@]} > 0)); then
+  if ! grep -q -- '-X' <<<"$(zfs send 2>&1 || true)"; then
+    die "zfs send -X (exclude) requires OpenZFS 2.1.0+; not supported by this version"
+  fi
+fi
+
 echo "Planned backup:"
-echo "  Source:          $SOURCE"
-echo "  Destination:     $DEST"
-echo "  Base snapshot:   ${SOURCE}@${BASE_SNAP}"
-echo "  New snapshot:    ${SOURCE}@${NEW_SNAP}"
-echo "  Destination pool: ${DEST_POOL}"
-echo "  Import step:      sudo zpool import -N ${DEST_POOL}"
+echo "  Source:            $SOURCE"
+echo "  Destination:       $DEST"
+echo "  Base snapshot:     ${SOURCE}@${BASE_SNAP}"
+echo "  New snapshot:      ${SOURCE}@${NEW_SNAP}"
+echo "  Destination pool:  ${DEST_POOL}"
+echo "  Import step:       sudo zpool import -N ${DEST_POOL}"
+echo "  Recv flags:        -u -F -x mountpoint (no mount, force rollback, strip mountpoint)"
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  echo "  Mode:            DRY-RUN (no commands executed)"
+  echo "  Mode:              DRY-RUN (no commands executed)"
 else
-  echo "  Mode:            LIVE"
+  echo "  Mode:              LIVE"
 fi
 
 if ((${#NORMALIZED_EXCLUDES[@]} > 0)); then
@@ -399,6 +455,15 @@ fi
 if ! confirm "Continue with this plan?"; then
   echo "Aborted."
   exit 0
+fi
+
+# Prevent concurrent runs against the same source/destination pair.
+LOCK_FILE="/tmp/zfs-backup-${SOURCE//\//_}-${DEST//\//_}.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    die "another instance is already running for this source/destination pair (lock: $LOCK_FILE)"
+  fi
 fi
 
 DEST_IMPORTED=0
@@ -432,6 +497,11 @@ run_step "List source snapshots" sudo zfs list -t snapshot -r "$SOURCE"
 run_step "List destination snapshots" sudo zfs list -t snapshot -r "$DEST"
 run_step "Create recursive snapshot ${SOURCE}@${NEW_SNAP}" sudo zfs snapshot -r "${SOURCE}@${NEW_SNAP}"
 
+# Track whether the new snapshot was successfully created.
+if [[ "$DRY_RUN" -eq 0 ]] && snapshot_exists "${SOURCE}@${NEW_SNAP}"; then
+  SNAP_CREATED=1
+fi
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo
   echo "Note: exact send size is not calculated in dry-run mode because ${SOURCE}@${NEW_SNAP} is not created."
@@ -441,7 +511,11 @@ else
   if ! SEND_SIZE="$(calculate_send_size)"; then
     die "failed to calculate send size for ${SOURCE}@${NEW_SNAP}"
   fi
-  echo "Stream size: ${SEND_SIZE} bytes ($(human_size "$SEND_SIZE"))"
+  if [[ "$SEND_SIZE" -eq 0 ]]; then
+    echo "Stream size: 0 bytes — nothing changed since the base snapshot."
+  else
+    echo "Stream size: ${SEND_SIZE} bytes ($(human_size "$SEND_SIZE"))"
+  fi
 fi
 
 build_send_cmd
@@ -449,7 +523,15 @@ build_pv_cmd
 build_recv_cmd
 
 run_pipeline_step "Send incremental stream to ${DEST}"
+
+# If the send completed, the new snapshot now exists on the destination.
+# Clear the warning flag so the EXIT trap does not suggest destroying it.
+if [[ "$DRY_RUN" -eq 0 ]] && snapshot_exists "${DEST}@${NEW_SNAP}"; then
+  SNAP_CREATED=0
+fi
+
 run_step "Verify destination snapshots" sudo zfs list -t snapshot -r "$DEST"
+run_step "Export destination pool" sudo zpool export "$DEST_POOL"
 
 echo
 if [[ "$DRY_RUN" -eq 1 ]]; then
