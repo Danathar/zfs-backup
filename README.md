@@ -12,11 +12,12 @@ Interactive incremental ZFS backup script for controlled snapshot replication wi
 
 ## Requirements
 
-- `bash`
+- `bash` 4.4+
 - `zfs` and `zpool`
 - `pv`
 - `sudo` access for ZFS operations
-- OpenZFS with native `zfs send -X` exclusion support
+- OpenZFS with native `zfs send -X` exclusion support (2.1.0+, only required when using `-e`)
+- `flock` (optional, for concurrency safety)
 
 ## Usage
 
@@ -36,8 +37,10 @@ Options:
 
 Notes:
 - This script is for incremental replication. The destination must already contain the base snapshot on the destination root.
+- The destination must not be inside the source pool (e.g., `-s tank -d tank/backup` is rejected).
 - The destination target must not have mounted datasets underneath the selected destination root.
 - A dry-run only validates the destination if the destination pool is already imported. If you want destination-side validation during a dry-run, import the pool first with `sudo zpool import -N DEST_POOL`.
+- The script validates `sudo` access upfront so that password prompts cannot break the send pipeline.
 
 ## Typical Workflow
 
@@ -71,9 +74,13 @@ Notes:
 - The script is interactive and asks for confirmation before each step.
 - If the destination pool is already imported, the import step is skipped automatically.
 - The script validates the destination root and every non-excluded descendant dataset for the selected base snapshot before it creates the new source snapshot.
+- If the new snapshot name (`-n`) already exists on the source, the script aborts before doing any work.
 - Excluded datasets are omitted with native `zfs send -R -X ...`; the script no longer deletes source snapshots to implement exclusions.
-- The receive side uses `zfs recv -u -F -x mountpoint` so the backup does not mount datasets during receive and does not inherit source mountpoints onto the backup host.
+- The receive side uses `zfs recv -u -F -x mountpoint` so the backup does not mount datasets during receive and does not inherit source mountpoints onto the backup host. Note: `-F` forces rollback on the destination if it has diverged from the base snapshot.
 - In live mode, the script calculates the exact stream size first and passes it to `pv` so progress percentage and ETA are meaningful.
+- If the send fails or is interrupted, an exit trap warns about the orphaned source snapshot and prints the destroy command.
+- If the script imported the destination pool, it offers to export it at the end. If the pool was already imported before the script started, the export step is skipped to avoid disrupting other consumers of the pool.
+- A lock file (`flock`) prevents concurrent runs against the same source/destination pair. If `flock` is not available, this check is skipped.
 - Log output is written to the selected log file and echoed to terminal.
 
 ## License

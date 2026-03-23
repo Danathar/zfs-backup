@@ -15,7 +15,7 @@ set -Eeuo pipefail
 # 8) Calculate exact stream size for pv when running live.
 # 9) Send incremental replication stream with pv progress.
 # 10) Verify destination snapshots.
-# 11) Optionally export destination pool.
+# 11) Optionally export destination pool (only if this script imported it).
 #
 # Dry-run behavior:
 # - Prints commands that would run.
@@ -398,7 +398,7 @@ if ! command -v pv >/dev/null 2>&1; then
 fi
 
 # Validate sudo access upfront so password prompts don't break the send pipeline.
-if ! sudo -v 2>/dev/null; then
+if ! sudo -v; then
   echo "Error: sudo access is required but could not be validated." >&2
   exit 1
 fi
@@ -467,6 +467,7 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 DEST_IMPORTED=0
+SCRIPT_IMPORTED_POOL=0
 if sudo zpool list -H -o name "$DEST_POOL" >/dev/null 2>&1; then
   DEST_IMPORTED=1
   echo
@@ -476,6 +477,7 @@ else
   run_step "Import destination pool without mounting" sudo zpool import -N "$DEST_POOL"
   if sudo zpool list -H -o name "$DEST_POOL" >/dev/null 2>&1; then
     DEST_IMPORTED=1
+    SCRIPT_IMPORTED_POOL=1
   fi
 fi
 
@@ -531,7 +533,13 @@ if [[ "$DRY_RUN" -eq 0 ]] && snapshot_exists "${DEST}@${NEW_SNAP}"; then
 fi
 
 run_step "Verify destination snapshots" sudo zfs list -t snapshot -r "$DEST"
-run_step "Export destination pool" sudo zpool export "$DEST_POOL"
+
+# Only offer to export the pool if this script imported it.  If the pool was
+# already imported before the script started, exporting could disrupt unrelated
+# datasets and services on the same pool.
+if [[ "$SCRIPT_IMPORTED_POOL" -eq 1 ]]; then
+  run_step "Export destination pool" sudo zpool export "$DEST_POOL"
+fi
 
 echo
 if [[ "$DRY_RUN" -eq 1 ]]; then
